@@ -518,7 +518,7 @@ export default {
       }
 
       // 如果用户未验证，触发验证流程
-      await sendMessageToUser(chatId, "欢迎使用私聊机器人，请完成验证以开始使用！");
+      await sendMessageToUser(chatId, "欢迎使用私聊机器人，请完成验证！");
       await handleVerification(chatId, messageId);
     }
 
@@ -1129,7 +1129,7 @@ export default {
       const failures = verificationState ? verificationState.verification_failures || 0 : 0;
       
       if (!storedCode) {
-        await sendMessageToUser(chatId, '验证码已失效，请重新使用 /start 命令获取新验证码。');
+        await sendMessageToUser(chatId, '验证码已失效，请使用 /start 命令获取新验证码。');
         return;
       }
 
@@ -1156,7 +1156,7 @@ export default {
               .bind(newFailures, chatId)
               .run();
 
-            await sendMessageToUser(chatId, '连续验证失败5次，您已被自动加入黑名单。如需解除，请联系管理员。');
+            await sendMessageToUser(chatId, '连续验证失败5次，您已被自动加入黑名单。');
           } else {
             await env.D1.prepare('UPDATE user_states SET verification_failures = ? WHERE chat_id = ?')
               .bind(newFailures, chatId)
