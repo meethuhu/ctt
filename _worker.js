@@ -325,12 +325,12 @@ export default {
       }
 
       if (!userState.is_verified) {
-        await sendMessageToUser(chatId, "您尚未完成验证，请使用 /start 命令进行验证！");
+        await sendMessageToUser(chatId, "未完成验证，请使用 /start 命令进行验证！");
         return;
       }
 
       if (await checkMessageRate(chatId)) {
-        await sendMessageToUser(chatId, `消息发送频率过高，此消息未被转发：${text || '非文本消息'}\n\n请稍后再试，每分钟最多可发送${MAX_MESSAGES_PER_MINUTE}条消息。`);
+        await sendMessageToUser(chatId, `消息发送频率过高，此消息未被转发：${text || '非文本消息'}\n每分钟最多可发送 ${MAX_MESSAGES_PER_MINUTE} 条消息`);
         return;
       }
 
@@ -358,7 +358,10 @@ export default {
       if (message.forward_date) {
         await forwardMessageToTopic(topicId, message);
       } else if (text) {
-        await sendMessageToTopic(topicId, text);
+        // 添加用户ID信息在消息前面，使用Markdown格式让用户ID可点击
+        const userId = userInfo.id;
+        const formattedText = `[${userId}](tg://user?id=${userId}): ${text}`;
+        await sendMessageToTopic(topicId, formattedText);
       } else {
         await copyMessageToTopic(topicId, message);
       }
@@ -507,7 +510,7 @@ export default {
     async function handleStartCommand(chatId, messageId, isVerified, isFirstVerification, userState) {
       // 检查 /start 命令的频率
       if (await checkStartCommandRate(chatId)) {
-        await sendMessageToUser(chatId, "您发送 /start 命令过于频繁，请15秒后再试！");
+        await sendMessageToUser(chatId, "操作过于频繁，请等待15秒后再试");
         return;
       }
 
@@ -687,7 +690,7 @@ export default {
         callback_data: `verify_${chatId}_${option}_${option === correctResult ? 'correct' : 'wrong'}`,
       }));
 
-      const question = `请计算：${num1} + ${num2} = ?（点击下方按钮完成验证）`;
+      const question = `请计算: ${num1} + ${num2} = ?`;
       
       try {
         await env.D1.prepare('INSERT OR REPLACE INTO user_states (chat_id, verification_code, is_verified, is_blocked, is_first_verification, verification_failures) VALUES (?, ?, COALESCE((SELECT is_verified FROM user_states WHERE chat_id = ?), FALSE), COALESCE((SELECT is_blocked FROM user_states WHERE chat_id = ?), FALSE), COALESCE((SELECT is_first_verification FROM user_states WHERE chat_id = ?), TRUE), COALESCE((SELECT verification_failures FROM user_states WHERE chat_id = ?), 0))')
@@ -1196,13 +1199,13 @@ export default {
               .bind(newFailures, chatId)
               .run();
 
-            await sendMessageToUser(chatId, `验证失败，这是第${newFailures}次失败，连续5次失败将自动加入黑名单。请重新尝试。`);
+            await sendMessageToUser(chatId, `验证失败(${newFailures}/5)，连续5次失败将自动加入黑名单。`);
             await handleVerification(chatId, messageId);
           }
         }
       } catch (error) {
         console.error(`验证回调处理失败: chatId=${chatId}, error=${error}`);
-        await sendMessageToUser(chatId, "验证处理出错，请稍后使用 /start 命令重试。");
+        await sendMessageToUser(chatId, "验证过程出错，请稍后使用 /start 重新验证");
         return;
       }
 
