@@ -34,22 +34,18 @@ export default {
       console.error('GROUP_ID_ENV is not defined');
     }
 
-    // 检查 D1 绑定
     if (!env.D1) {
       console.error('D1 database is not bound');
       return new Response('Server configuration error: D1 database is not bound', { status: 500 });
     }
 
-    // 在每次部署时自动检查和修复数据库表
     await checkAndRepairTables(env.D1);
 
-    // 自动注册 webhook（仅在首次启动时执行）
     if (!isWebhookInitialized && BOT_TOKEN) {
-      await autoRegisterWebhook(request);
-      isWebhookInitialized = true; // 标记为已初始化，避免重复注册
+      await registerWebhook(request);
+      isWebhookInitialized = true;
     }
 
-    // 清理过期的验证码缓存（基于时间间隔）
     await runPeriodicCleanup(env.D1);
 
     // ======================================================
@@ -57,7 +53,6 @@ export default {
     // ======================================================
     // 主处理函数
     async function handleRequest(request) {
-      // 检查环境变量是否加载
       if (!BOT_TOKEN || !GROUP_ID) {
         console.error('Missing required environment variables');
         return new Response('Server configuration error: Missing required environment variables', { status: 500 });
@@ -74,65 +69,54 @@ export default {
           return new Response('Bad Request', { status: 400 });
         }
       } else if (url.pathname === '/registerWebhook') {
-        return await registerWebhook(request); // 保留手动注册接口以备不时之需
+        return await registerWebhook(request);
       } else if (url.pathname === '/unRegisterWebhook') {
         return await unRegisterWebhook();
       } else if (url.pathname === '/checkTables') {
         await checkAndRepairTables(env.D1);
         return new Response('Database tables checked and repaired', { status: 200 });
       } else if (url.pathname === '/force-nickname-update') {
-        // 强制执行昵称更新测试
-        try {
-          const params = new URL(request.url).searchParams;
-          const chatId = params.get('chatId');
-          
-          if (!chatId) {
-            return new Response('缺少chatId参数', { status: 400 });
-          }
-          
-          // 查询用户信息
-          const userInfo = await getUserInfo(chatId);
-          if (!userInfo) {
-            return new Response(`找不到用户 ${chatId} 的信息`, { status: 404 });
-          }
-          
-          const nickname = `${userInfo.first_name} ${userInfo.last_name || ''}`.trim();
-          const topicName = `${nickname}`;
-          
-          // 获取话题ID
-          const topicId = await getExistingTopicId(chatId);
-          if (!topicId) {
-            return new Response(`用户 ${chatId} 没有对应的话题`, { status: 404 });
-          }
-          
-          // 查询用户当前的昵称记录
-          const userState = await env.D1.prepare(
-            'SELECT last_nickname FROM user_states WHERE chat_id = ?'
-          ).bind(chatId).first();
-          
-          const oldNickname = userState?.last_nickname || '未知';
-          
-          // 强制更新话题名称
-          console.log(`强制更新用户 ${chatId} 的话题名称，从 ${oldNickname} 到 ${nickname}`);
-          
-          const updated = await updateForumTopicName(topicId, topicName);
-          
-          if (updated) {
-            // 更新用户的昵称记录
-            await env.D1.prepare(
-              'UPDATE user_states SET last_nickname = ? WHERE chat_id = ?'
-            ).bind(nickname, chatId).run();
-            
-            return new Response(`成功更新用户 ${chatId} 的话题名称为 ${topicName}`, { status: 200 });
-          } else {
-            return new Response(`更新用户 ${chatId} 的话题名称失败`, { status: 500 });
-          }
-        } catch (error) {
-          console.error('Error forcing nickname update:', error);
-          return new Response(`强制更新话题名称时发生错误: ${error.toString()}`, { status: 500 });
-        }
+        return await handleForceNicknameUpdate(request);
       }
       return new Response('Not Found', { status: 404 });
+    }
+
+    async function handleForceNicknameUpdate(request) {
+      try {
+        const chatId = new URL(request.url).searchParams.get('chatId');
+        if (!chatId) {
+          return new Response('缺少chatId参数', { status: 400 });
+        }
+        
+        const userInfo = await getUserInfo(chatId);
+        if (!userInfo) {
+          return new Response(`找不到用户 ${chatId} 的信息`, { status: 404 });
+        }
+        
+        const nickname = `${userInfo.first_name} ${userInfo.last_name || ''}`.trim();
+        const topicId = await getExistingTopicId(chatId);
+        if (!topicId) {
+          return new Response(`用户 ${chatId} 没有对应的话题`, { status: 404 });
+        }
+        
+        const userState = await env.D1.prepare(
+          'SELECT last_nickname FROM user_states WHERE chat_id = ?'
+        ).bind(chatId).first();
+        
+        const updated = await updateForumTopicName(topicId, nickname);
+        if (updated) {
+          await env.D1.prepare(
+            'UPDATE user_states SET last_nickname = ? WHERE chat_id = ?'
+          ).bind(nickname, chatId).run();
+          
+          return new Response(`成功更新用户 ${chatId} 的话题名称为 ${nickname}`, { status: 200 });
+        }
+        
+        return new Response(`更新用户 ${chatId} 的话题名称失败`, { status: 500 });
+      } catch (error) {
+        console.error('Error forcing nickname update:', error);
+        return new Response(`强制更新话题名称时发生错误: ${error.toString()}`, { status: 500 });
+      }
     }
 
     // ======================================================
@@ -166,7 +150,6 @@ export default {
       try {
         console.log('Checking and repairing database tables...');
 
-        // 定义期望的表结构
         const expectedTables = {
           user_states: {
             columns: {
@@ -198,7 +181,6 @@ export default {
           }
         };
 
-        // 检查每个表
         for (const [tableName, structure] of Object.entries(expectedTables)) {
           try {
             const tableInfo = await d1.prepare(
@@ -210,7 +192,6 @@ export default {
               continue;
             }
 
-            // 检查表结构
             const columnsResult = await d1.prepare(
               `PRAGMA table_info(${tableName})`
             ).all();
@@ -223,7 +204,6 @@ export default {
               }])
             );
 
-            // 检查缺失的列
             for (const [colName, colDef] of Object.entries(structure.columns)) {
               if (!currentColumns.has(colName)) {
                 const columnParts = colDef.split(' ');
@@ -330,77 +310,101 @@ export default {
         last_message_time: null
       };
       
-      if (userState.is_blocked) {
-        return;
-      }
-
-      const isVerified = userState.is_verified;
-      const isFirstVerification = userState.is_first_verification;
-      
-      const userInfo = await getUserInfo(chatId);
-      const now = Date.now();
+      if (userState.is_blocked) return;
       
       if (text === '/start') {
-        await handleStartCommand(chatId, messageId, isVerified, isFirstVerification, userState);
+        await handleStartCommand(chatId, messageId, userState.is_verified, userState.is_first_verification, userState);
         return;
       }
 
-      if (!isVerified) {
+      if (!userState.is_verified) {
         await sendMessageToUser(chatId, "您尚未完成验证，请使用 /start 命令进行验证！");
         return;
       }
 
       if (await checkMessageRate(chatId)) {
-        const messageContent = text || '非文本消息';
-        await sendMessageToUser(chatId, `消息发送频率过高，此消息未被转发：${messageContent}\n\n请稍后再试，每分钟最多可发送${MAX_MESSAGES_PER_MINUTE}条消息。`);
+        await sendMessageToUser(chatId, `消息发送频率过高，此消息未被转发：${text || '非文本消息'}\n\n请稍后再试，每分钟最多可发送${MAX_MESSAGES_PER_MINUTE}条消息。`);
         return;
       }
 
       try {
-        const userName = userInfo.username || userInfo.first_name;
-        const nickname = `${userInfo.first_name} ${userInfo.last_name || ''}`.trim();
-        let topicName = `${nickname}`;
-        
-        let shouldUpdateTopicName = false;
-        if (userState.last_nickname && userState.last_message_time) {
-          const timeDiff = now - userState.last_message_time;
-          const oneDayInMs = 24 * 60 * 60 * 1000;
-          
-          if (timeDiff > oneDayInMs && userState.last_nickname !== nickname) {
-            shouldUpdateTopicName = true;
-          }
-        }
-        
-        await env.D1.prepare(
-          'UPDATE user_states SET last_nickname = ?, last_message_time = ? WHERE chat_id = ?'
-        ).bind(nickname, now, chatId).run();
-
-        let topicId = await getExistingTopicId(chatId);
-        if (!topicId) {
-          topicId = await createForumTopic(topicName, userName, nickname, userInfo.id);
-          
-          if (topicId) {
-            await saveTopicId(chatId, topicId);
-            await env.D1.prepare(
-              'UPDATE user_states SET last_nickname = ?, last_message_time = ? WHERE chat_id = ?'
-            ).bind(nickname, now, chatId).run();
-          } else {
-            console.error(`创建话题失败: chatId=${chatId}`);
-          }
-        } else if (shouldUpdateTopicName) {
-          await updateForumTopicName(topicId, topicName);
-        }
-
-        if (message.forward_date) {
-          await forwardMessageToTopic(topicId, message);
-        } else if (text) {
-          await sendMessageToTopic(topicId, text);
-        } else {
-          await copyMessageToTopic(topicId, message);
-        }
+        await handleUserMessage(message, userState);
       } catch (error) {
         console.error(`处理消息失败: chatId=${chatId}, error=${error}`);
       }
+    }
+
+    async function handleUserMessage(message, userState) {
+      const chatId = message.chat.id.toString();
+      const text = message.text || '';
+      const userInfo = await getUserInfo(chatId);
+      const now = Date.now();
+      
+      const nickname = `${userInfo.first_name} ${userInfo.last_name || ''}`.trim();
+      
+      // 更新用户状态和检查话题名称更新
+      await updateUserStateAndCheckTopicName(chatId, nickname, now, userState);
+      
+      const topicId = await getOrCreateTopic(chatId, nickname, userInfo);
+      if (!topicId) return;
+
+      if (message.forward_date) {
+        await forwardMessageToTopic(topicId, message);
+      } else if (text) {
+        await sendMessageToTopic(topicId, text);
+      } else {
+        await copyMessageToTopic(topicId, message);
+      }
+    }
+
+    // 新增通用函数处理用户状态更新和话题名称更新
+    async function updateUserStateAndCheckTopicName(chatId, nickname, now, userState) {
+      // 检查是否需要更新话题名
+      const shouldUpdateName = shouldUpdateNickname(userState, nickname, now);
+      
+      // 更新用户状态
+      await updateUserState(chatId, nickname, now);
+      
+      // 如果需要更新话题名
+      if (shouldUpdateName) {
+        const topicId = await getExistingTopicId(chatId);
+        if (topicId) {
+          await updateForumTopicName(topicId, nickname);
+        }
+      }
+      
+      return shouldUpdateName;
+    }
+
+    function shouldUpdateNickname(userState, newNickname, now) {
+      if (!userState.last_nickname || !userState.last_message_time) return false;
+      
+      const timeDiff = now - userState.last_message_time;
+      const oneDayInMs = 10;
+
+      return timeDiff > oneDayInMs && userState.last_nickname !== newNickname;
+    }
+
+    async function updateUserState(chatId, nickname, timestamp) {
+      await env.D1.prepare(
+        'UPDATE user_states SET last_nickname = ?, last_message_time = ? WHERE chat_id = ?'
+      ).bind(nickname, timestamp, chatId).run();
+    }
+
+    async function getOrCreateTopic(chatId, nickname, userInfo) {
+      let topicId = await getExistingTopicId(chatId);
+      if (topicId) return topicId;
+      
+      const userName = userInfo.username || userInfo.first_name;
+      topicId = await createForumTopic(nickname, userName, nickname, userInfo.id);
+      
+      if (topicId) {
+        await saveTopicId(chatId, topicId);
+        return topicId;
+      }
+      
+      console.error(`创建话题失败: chatId=${chatId}`);
+      return null;
     }
 
     /**
@@ -435,36 +439,17 @@ export default {
       
       // 获取用户信息和状态，检查昵称是否需要更新
       try {
+        // 获取用户状态
         const userState = await env.D1.prepare(
           'SELECT last_nickname, last_message_time FROM user_states WHERE chat_id = ?'
-        ).bind(privateChatId).first();
+        ).bind(privateChatId).first() || { last_nickname: null, last_message_time: null };
         
         const userInfo = await getUserInfo(privateChatId);
         const now = Date.now();
         const nickname = `${userInfo.first_name} ${userInfo.last_name || ''}`.trim();
         
-        // 检查昵称是否变化以及上次活跃时间是否超过24小时
-        let shouldUpdateTopicName = false;
-        if (userState && userState.last_nickname && userState.last_message_time) {
-          const timeDiff = now - userState.last_message_time;
-          const oneDayInMs = 24 * 60 * 60 * 1000;
-          
-          // 如果上次活跃时间超过24小时且昵称发生变化
-          if (timeDiff > oneDayInMs && userState.last_nickname !== nickname) {
-            shouldUpdateTopicName = true;
-          }
-        }
-        
-        // 更新用户记录的昵称和最后消息时间
-        await env.D1.prepare(
-          'UPDATE user_states SET last_nickname = ?, last_message_time = ? WHERE chat_id = ?'
-        ).bind(nickname, now, privateChatId).run();
-        
-        // 如果需要更新话题名称
-        if (shouldUpdateTopicName) {
-          const topicName = `${nickname}`;
-          const updated = await updateForumTopicName(topicId, topicName);
-        }
+        // 使用共用函数更新用户状态并检查话题名称更新
+        await updateUserStateAndCheckTopicName(privateChatId, nickname, now, userState);
       } catch (error) {
         // 出错时继续执行转发消息的逻辑
       }
@@ -666,44 +651,31 @@ export default {
     }
 
     async function sendVerification(chatId) {
-      const operations = ['+', '-', '*'];
-      const operation = operations[Math.floor(Math.random() * operations.length)];
-      
-      let num1, num2, correctResult;
-      
-      if (operation === '*') {
-        num1 = Math.floor(Math.random() * 5) + 1;
-        num2 = Math.floor(Math.random() * 5) + 1;
-        correctResult = num1 * num2;
-      } else if (operation === '+') {
-        num1 = Math.floor(Math.random() * 20) + 1;
-        num2 = Math.floor(Math.random() * 10) + 1;
-        correctResult = num1 + num2;
-      } else {
-        num1 = Math.floor(Math.random() * 20) + 10;
-        num2 = Math.floor(Math.random() * num1);
-        correctResult = num1 - num2;
-      }
+      // 生成两个1-20之间的随机数
+      const num1 = Math.floor(Math.random() * 20) + 1;
+      const num2 = Math.floor(Math.random() * 20) + 1;
+      const correctResult = num1 + num2;
 
+      // 生成错误选项（正确答案上下浮动1-3）
       const options = new Set();
       options.add(correctResult);
       while (options.size < 4) {
-        let offset = Math.floor(Math.random() * 5) + 1;
+        let offset = Math.floor(Math.random() * 3) + 1;
         if (Math.random() > 0.5) offset = -offset;
         
         const wrongResult = correctResult + offset;
-        if (wrongResult !== correctResult && wrongResult > 0) {
+        if (wrongResult > 0) {
           options.add(wrongResult);
         }
       }
       const optionArray = Array.from(options).sort(() => Math.random() - 0.5);
 
       const buttons = optionArray.map((option) => ({
-        text: `(${option})`,
+        text: `${option}`,
         callback_data: `verify_${chatId}_${option}_${option === correctResult ? 'correct' : 'wrong'}`,
       }));
 
-      const question = `请计算：${num1} ${operation} ${num2} = ?（点击下方按钮完成验证）`;
+      const question = `请计算：${num1} + ${num2} = ?（点击下方按钮完成验证）`;
       
       try {
         await env.D1.prepare('INSERT OR REPLACE INTO user_states (chat_id, verification_code, is_verified, is_blocked, is_first_verification, verification_failures) VALUES (?, ?, COALESCE((SELECT is_verified FROM user_states WHERE chat_id = ?), FALSE), COALESCE((SELECT is_blocked FROM user_states WHERE chat_id = ?), FALSE), COALESCE((SELECT is_first_verification FROM user_states WHERE chat_id = ?), TRUE), COALESCE((SELECT verification_failures FROM user_states WHERE chat_id = ?), 0))')
@@ -830,8 +802,12 @@ export default {
       }
       const topicId = data.result.message_thread_id;
 
+      // 转换为北京时间
       const now = new Date();
-      const formattedTime = now.toISOString().replace('T', ' ').substring(0, 19);
+      now.setHours(now.getHours() + 8); // UTC+8
+      const formattedTime = now.toISOString()
+        .replace('T', ' ')
+        .slice(0, 19);
 
       const pinnedMessage = `昵称: ${nickname}\n用户名: @${userName}\nUserID: [${userId}](tg://user?id=${userId})\n发起时间: ${formattedTime}`;
       const messageResponse = await sendMessageToTopic(topicId, pinnedMessage);
@@ -1043,65 +1019,67 @@ export default {
     // 网络请求和Webhook管理
     // ======================================================
     async function fetchWithRetry(url, options, retries = 3, backoff = 1000) {
-      let lastError;
-      
       for (let i = 0; i < retries; i++) {
         try {
           const response = await fetch(url, options);
+          if (response.ok) return response;
           
-          if (response.ok) {
-            return response;
-          } 
-          
-          if (response.status === 429) {
-            const retryAfter = parseInt(response.headers.get('Retry-After') || '0');
-            const delay = retryAfter > 0 
-              ? retryAfter * 1000 
+          // 只对频率限制和服务器错误进行重试
+          if (response.status === 429 || response.status >= 500) {
+            const delay = response.status === 429
+              ? parseInt(response.headers.get('Retry-After') || '0') * 1000 || backoff
               : backoff * Math.pow(2, i);
-              
+            
             await new Promise(resolve => setTimeout(resolve, delay));
             continue;
           }
           
-          const errorMsg = `Request failed with status ${response.status}: ${response.statusText}`;
-          lastError = new Error(errorMsg);
-          
-          if (response.status >= 500) {
-            await new Promise(resolve => setTimeout(resolve, backoff * Math.pow(2, i)));
-            continue;
-          }
-          
-          throw lastError;
+          // 其他错误直接抛出
+          throw new Error(`Request failed with status ${response.status}: ${response.statusText}`);
         } catch (error) {
-          lastError = error;
-          if (i === retries - 1) {
-            break;
-          }
+          // 最后一次尝试失败，或者是网络错误
+          if (i === retries - 1) throw error;
           await new Promise(resolve => setTimeout(resolve, backoff * Math.pow(2, i)));
         }
       }
-      
-      console.error(`Failed to fetch after ${retries} retries:`, lastError);
-      throw lastError || new Error(`Failed to fetch after ${retries} retries`);
     }
 
     async function registerWebhook(request) {
       const webhookUrl = `${new URL(request.url).origin}/webhook`;
-      const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: webhookUrl }),
-      }).then(r => r.json());
-      return new Response(response.ok ? 'Webhook set successfully' : JSON.stringify(response, null, 2));
+      try {
+        const response = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: webhookUrl }),
+        });
+        
+        const data = await response.json();
+        if (!data.ok) {
+          console.error('Webhook registration failed:', data.description);
+          return new Response(`Webhook registration failed: ${data.description}`, { status: 500 });
+        }
+        
+        return new Response('Webhook set successfully');
+      } catch (error) {
+        console.error('Error during webhook registration:', error);
+        return new Response('Webhook registration failed', { status: 500 });
+      }
     }
 
     async function unRegisterWebhook() {
-      const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: '' }),
-      }).then(r => r.json());
-      return new Response(response.ok ? 'Webhook removed' : JSON.stringify(response, null, 2));
+      try {
+        const response = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: '' }),
+        });
+        
+        const data = await response.json();
+        return new Response(data.ok ? 'Webhook removed successfully' : 'Failed to remove webhook');
+      } catch (error) {
+        console.error('Error removing webhook:', error);
+        return new Response('Failed to remove webhook', { status: 500 });
+      }
     }
 
     /**
