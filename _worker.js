@@ -44,6 +44,9 @@ export default {
     if (!isWebhookInitialized && BOT_TOKEN) {
       await registerWebhook(request);
       isWebhookInitialized = true;
+      
+      // 注册webhook后删除菜单按钮
+      await removeMenuButton();
     }
 
     await runPeriodicCleanup(env.D1);
@@ -77,6 +80,9 @@ export default {
         return new Response('Database tables checked and repaired', { status: 200 });
       } else if (url.pathname === '/force-nickname-update') {
         return await handleForceNicknameUpdate(request);
+      } else if (url.pathname === '/removeMenuButton') {
+        await removeMenuButton();
+        return new Response('菜单按钮已移除', { status: 200 });
       }
       return new Response('Not Found', { status: 404 });
     }
@@ -158,6 +164,7 @@ export default {
               is_verified: 'BOOLEAN DEFAULT FALSE',
               verification_code: 'TEXT',
               last_verification_message_id: 'TEXT',
+              welcome_message_id: 'TEXT',
               is_first_verification: 'BOOLEAN DEFAULT FALSE',
               verification_failures: 'INTEGER DEFAULT 0',
               last_nickname: 'TEXT',
@@ -518,7 +525,12 @@ export default {
       }
 
       // 如果用户未验证，触发验证流程
-      await sendMessageToUser(chatId, "欢迎使用私聊机器人，请完成验证！");
+      const welcomeResponse = await sendMessageToUser(chatId, "欢迎使用私聊机器人，请完成验证！");
+      if (welcomeResponse && welcomeResponse.ok) {
+        await env.D1.prepare('UPDATE user_states SET welcome_message_id = ? WHERE chat_id = ?')
+          .bind(welcomeResponse.result.message_id.toString(), chatId)
+          .run();
+      }
       await handleVerification(chatId, messageId);
     }
 
@@ -1010,8 +1022,10 @@ export default {
         if (!data.ok) {
           console.error(`发送消息到用户失败: ${data.description}`);
         }
+        return data;
       } catch (error) {
         console.error(`发送消息到用户出错: ${error}`);
+        return null;
       }
     }
 
@@ -1143,7 +1157,27 @@ export default {
         });
 
         if (result === 'correct') {
-          await env.D1.prepare('UPDATE user_states SET is_verified = ?, verification_code = NULL, verification_failures = 0, is_first_verification = ? WHERE chat_id = ?')
+          // 删除欢迎验证消息
+          try {
+            const userState = await env.D1.prepare('SELECT welcome_message_id FROM user_states WHERE chat_id = ?')
+              .bind(chatId)
+              .first();
+            
+            if (userState && userState.welcome_message_id) {
+              await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: chatId,
+                  message_id: userState.welcome_message_id,
+                }),
+              });
+            }
+          } catch (error) {
+            // 删除欢迎消息失败不影响验证流程
+          }
+          
+          await env.D1.prepare('UPDATE user_states SET is_verified = ?, verification_code = NULL, verification_failures = 0, is_first_verification = ?, welcome_message_id = NULL WHERE chat_id = ?')
             .bind(true, false, chatId)
             .run();
 
@@ -1183,6 +1217,64 @@ export default {
         });
       } catch (error) {
         // 删除消息失败不影响验证流程
+      }
+    }
+
+    async function removeMenuButton() {
+      try {
+        // 删除机器人的命令菜单
+        const response = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMyCommands`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            scope: {
+              type: "default"
+            }
+          }),
+        });
+        
+        const data = await response.json();
+        if (!data.ok) {
+          console.error('Failed to remove menu button:', data.description);
+          return false;
+        }
+        
+        // 为管理员设置命令
+        const adminCommandsResponse = await fetchWithRetry(`https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            commands: [
+              {
+                command: "block",
+                description: "将用户拉黑"
+              },
+              {
+                command: "unblock",
+                description: "解除用户拉黑"
+              },
+              {
+                command: "checkblock",
+                description: "检查用户是否在黑名单中"
+              }
+            ],
+            scope: {
+              type: "chat",
+              chat_id: GROUP_ID
+            }
+          }),
+        });
+        
+        const adminData = await adminCommandsResponse.json();
+        if (!adminData.ok) {
+          console.error('Failed to set admin commands:', adminData.description);
+          return false;
+        }
+        
+        return true;
+      } catch (error) {
+        console.error('Error removing menu button:', error);
+        return false;
       }
     }
 
